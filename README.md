@@ -2,7 +2,7 @@
 
 ScannerLab es una aplicación de escaneo de red local que se ejecuta en Windows y muestra en tiempo real información sobre tu conexión WiFi, dispositivos conectados, latencia, velocidad de internet y métricas de red.
 
-Repositorio: https://github.com/Nico1091/Scannerlab
+Repositorio: https://github.com/Nico1091/scannerlab
 
 ---
 
@@ -23,14 +23,14 @@ Sigue estos pasos para instalar y ejecutar la aplicación desde el repositorio d
 Abre una terminal (PowerShell o CMD) y ejecuta:
 
 ```bash
-git clone https://github.com/Nico1091/Scannerlab.git
+git clone https://github.com/Nico1091/scannerlab.git
 cd Scannerlab
 ```
 
 Si deseas clonar una rama específica (por ejemplo, `main`):
 
 ```bash
-git clone -b main https://github.com/Nico1091/Scannerlab.git
+git clone -b main https://github.com/Nico1091/scannerlab.git
 cd Scannerlab
 ```
 
