@@ -68,3 +68,101 @@ fuentes.
 ## Relacionado
 
 - Fase 1 del plan de mejora: ya ejecutada (rama `fase-1-seguridad`).
+
+---
+
+## 2026-09-19 — Arquitectura acordada y vía abierta
+
+**Decisión de Nicolás:** la captura corre en **WSL2**, encapsulada en **Docker**,
+dedicada solo a eso. La vía por la que los datos llegan a la interfaz de NetPulse
+se decide al implementar.
+
+**Matiz que hubo que corregir:** Docker en Windows corre sobre el *mismo* kernel de
+WSL2. Un contenedor **no aporta drivers**: el módulo del TP-Link se necesitaba a
+nivel de WSL2 igual. Docker sirve para **aislar las herramientas** (iw, tcpdump,
+aircrack), no para resolver el driver.
+
+### Lo que estaba cerrado y ya no lo está
+
+El kernel de WSL2 que publica Microsoft viene recortado: en `net/wireless` solo trae
+`intel` y `rsi`. **No existía driver para el TP-Link.** Eso parecía cerrar la vía.
+
+No la cerraba. El driver `rtl8xxxu` del núcleo **sí soporta este chip** —
+`0x2357, 0x0109` figura en su tabla — y `mac80211` **añade el modo monitor a todos
+los drivers que lo usan** (`net/mac80211/main.c:1353`). Faltaba compilar el módulo,
+no cambiar de plan.
+
+### El error que no hay que repetir
+
+Se empezó compilando **el kernel entero** con 16 núcleos. Es innecesario y castiga el
+equipo. Basta compilar **solo el módulo** contra las fuentes, con 2 núcleos y prioridad
+mínima: unos minutos, sin calentar la máquina, y **sin reemplazar el kernel**.
+
+    make modules_prepare
+    make M=drivers/net/wireless/realtek/rtl8xxxu modules KBUILD_MODPOST_WARN=1
+
+Dos trampas dentro de eso:
+
+- **Faltan `Module.symvers`**, así que `modpost` falla por símbolos indefinidos.
+  `KBUILD_MODPOST_WARN=1` los deja para resolver en la carga, que es donde se
+  resuelven de verdad. El módulo cargó limpio, sin forzar nada.
+- **El vermagic salía con un `+`** (`...WSL2+`) y el kernel lo habría rechazado. Lo
+  añade `scripts/setlocalversion` al ver un repositorio git sin etiqueta limpia.
+  Se quita **renombrando `.git`** del árbol; un `.scmversion` vacío no basta.
+
+### El cortafuegos, y cómo se esquivó sin abrirlo
+
+`usbipd attach --wsl` falla: el **cortafuegos de Hyper-V** trae
+`DefaultInboundAction = Block`, y WSL no alcanza el puerto 3240 de Windows. La
+solución habitual es abrir ese puerto, pero **Nicolás lo rechazó por excesivo**.
+
+Se comprobó que **el sentido contrario sí está permitido**: de Windows hacia WSL. De
+ahí la vía definitiva, un **túnel SSH inverso**:
+
+    ssh -N -R 127.0.0.1:3240:127.0.0.1:3240 root@<ip-wsl>
+
+Windows abre la conexión, y el puerto del USB aparece *dentro* de Linux. **No se abre
+ningún puerto, no se toca el cortafuegos y no hace falta administrador.** El servidor
+SSH escucha en el 2222, solo por clave, sin contraseñas.
+
+Hubo que compilar también el cliente `usbip` (`tools/usb/usbip` del propio kernel):
+el de Ubuntu es un envoltorio que exige paquetes inexistentes para este kernel.
+
+### Lo que queda instalado y configurado
+
+| Pieza | Estado |
+|---|---|
+| `usbipd-win` 5.3.0 | instalado; adaptador `Shared` en el bus `2-1` |
+| `rtl8xxxu.ko` | compilado y **cargado**; carga sola al arrancar WSL |
+| `vhci-hcd` | cargado; carga solo al arrancar WSL |
+| firmware `rtl8192eu_nic.bin` | instalado |
+| cliente `usbip` | compilado en `/usr/local/sbin/usbip` |
+| Docker Engine 29.8.1 | dentro de WSL2, arranca solo |
+| Imagen `netpulse-captura` | construida |
+| SSH (puerto 2222, solo clave) | arranca solo |
+| Wi-Fi interna | **intacta**: nunca se tocó |
+
+Verificado en vivo: Linux **ve el adaptador** por el túnel
+(`TL-WN823N v2/v3 [Realtek RTL8192EU]`) y el USB **entra** en Linux
+(`vhci_hcd: Device attached`).
+
+### Lo único que falta comprobar
+
+Tras el `attach`, la enumeración USB **se quedó a medias**: el último mensaje del
+núcleo es `SetAddress Request`, y no llega el `New USB device found` que precede a
+la carga del driver. Faltaba el firmware, que **ya está instalado**; hay que repetir
+el `attach` y mirar el `dmesg`. Si el atasco persiste, la sospecha es la latencia del
+túnel durante la enumeración, y se prueba con `-o Compression=no` o pasando el
+dispositivo con el adaptador ya alimentado.
+
+**No se dejó nada corriendo**: el adaptador está devuelto a Windows y el túnel cerrado.
+
+### Cómo se usa (cuando haya alguien delante)
+
+    cd Desktop\scannerlab\captura-externa
+    .\netpulse-captura.ps1 estado
+    .\netpulse-captura.ps1 iniciar
+    .\netpulse-captura.ps1 resumen -Segundos 30
+    .\netpulse-captura.ps1 detener
+
+`monitor.sh` se niega a tocar la tarjeta interna: la compara por MAC y aborta.
