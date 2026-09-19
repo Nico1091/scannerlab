@@ -2,6 +2,14 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { obtenerDatos, obtenerDispositivos, obtenerInfoDetalladaDispositivo, lookupOUI, pingLive, obtenerWiFiLive } = require('./escaneo');
+const tele = require('./telemetria');
+const interceptor = require('./interceptor');
+const sistema = require('./sistema');
+process.on('SIGINT', () => { try { sistema.revertirSync(); } catch {} process.exit(0); });
+process.on('exit', () => { try { sistema.revertirSync(); } catch {} });
+
+// Cache del ultimo escaneo de dispositivos para la auditoria de red
+let lastDevicesCache = { data: [], datos: null, ts: 0 };
 
 // Manejo de errores no capturados para evitar crash del servidor
 process.on('uncaughtException', (err) => {
@@ -65,7 +73,16 @@ const MIME = {
   '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
   '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
 };
 
 function startServer(port) {
@@ -78,6 +95,102 @@ function startServer(port) {
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    // ===== Endpoints de telemetría (NetPulse Radar) =====
+    const jsend = (obj, code = 200) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+
+    if (req.url === '/api/tele/conexiones') {
+      try { jsend({ ok: true, data: await tele.conexiones() }); }
+      catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/tele/throughput') {
+      try {
+        const tp = await tele.throughput();
+        jsend({ ok: true, data: tp });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/tele/redes') {
+      try { jsend({ ok: true, data: await tele.redesCercanas() }); }
+      catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/tele/dns') {
+      try { jsend({ ok: true, data: await tele.dnsCache() }); }
+      catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url.startsWith('/api/tele/captura')) {
+      try {
+        const seg = parseInt((req.url.match(/seg=(\d+)/) || [])[1], 10) || 6;
+        jsend({ ok: true, data: await tele.capturaProfunda(seg) });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/tele/auditoria') {
+      try {
+        let disp = lastDevicesCache.data, datos = lastDevicesCache.datos;
+        if (!datos || (Date.now() - lastDevicesCache.ts) > 120000) {
+          datos = await obtenerDatos();
+          disp = await obtenerDispositivos(datos.ip.gateway);
+          lastDevicesCache = { data: disp, datos, ts: Date.now() };
+        }
+        jsend({ ok: true, data: tele.auditoria(datos, disp) });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/tele/historial') {
+      try { jsend({ ok: true, data: tele.cargarHist() }); }
+      catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/tele/resumen') {
+      try {
+        const [tp, cx] = await Promise.all([tele.throughput(), tele.conexiones()]);
+        tele.registrarHistorial(tp, cx);
+        jsend({ ok: true, data: { throughput: tp, conexiones: cx } });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+
+    // ===== Interceptor (captura descifrada del propio equipo) =====
+    if (req.url === '/api/interceptor/start' && req.method === 'POST') {
+      try {
+        const r = await interceptor.iniciar();
+        if (!r.ok) return jsend({ ok: false, error: r.error }, 500);
+        const cert = await sistema.confiarCert(interceptor.CA_CERT);
+        const px = await sistema.activarProxy(8080);
+        jsend({ ok: true, cert, proxy: px, estado: interceptor.status() });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/interceptor/stop' && req.method === 'POST') {
+      try {
+        await sistema.desactivarProxy();
+        await interceptor.detener();
+        jsend({ ok: true, estado: interceptor.status() });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url === '/api/interceptor/status') {
+      try {
+        const st = interceptor.status();
+        st.proxyActivo = await sistema.proxyActivo();
+        st.certConfiado = await sistema.certConfiado();
+        jsend({ ok: true, data: st });
+      } catch (e) { jsend({ ok: false, error: e.message }, 500); }
+      return;
+    }
+    if (req.url.startsWith('/api/interceptor/flujos')) {
+      const since = parseInt((req.url.match(/since=(\d+)/) || [])[1], 10) || 0;
+      jsend({ ok: true, data: interceptor.flujos(since) });
+      return;
+    }
+    if (req.url === '/api/interceptor/medios') {
+      jsend({ ok: true, data: interceptor.medios() });
       return;
     }
 

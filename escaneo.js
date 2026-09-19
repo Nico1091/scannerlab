@@ -87,7 +87,11 @@ function extract(output, regex) {
 }
 
 async function obtenerDatos() {
-  const wifiOut = await run('netsh wlan show interfaces');
+  // Windows 11 exige permiso de ubicacion para 'netsh wlan'. Si esta denegado,
+  // seguimos adelante con los datos de IP y el resto del escaneo.
+  const wifiOut = await run('netsh wlan show interfaces').catch(() => '');
+  const perfilRed = wifiOut ? '' : await run('powershell -NoProfile -Command "(Get-NetConnectionProfile -InterfaceAlias Wi-Fi).Name"').catch(() => '');
+  const macAdaptador = wifiOut ? '' : await run('powershell -NoProfile -Command "(Get-NetAdapter -Name Wi-Fi).MacAddress"').catch(() => '');
 
   const ssid        = extract(wifiOut, /SSID\s*:\s*(.+)/i);
   const bssid       = extract(wifiOut, /BSSID\s*:\s*(.+)/i);
@@ -113,7 +117,7 @@ async function obtenerDatos() {
   return {
     fecha: new Date().toLocaleString('es-ES'),
     red: {
-      nombre: ssid || 'Desconocida',
+      nombre: ssid || perfilRed.trim() || 'Desconocida',
       bssid: bssid || 'N/A',
       tecnologia: radio || 'N/A',
       canal: channel || 'N/A',
@@ -121,7 +125,7 @@ async function obtenerDatos() {
       recepcion: reception ? `${reception} Mbps` : 'N/A',
       transmision: transmission ? `${transmission} Mbps` : 'N/A',
       estado: state || 'N/A',
-      mac: mac || 'N/A',
+      mac: mac || macAdaptador.trim().replace(/-/g, ':') || 'N/A',
     },
     ip: {
       direccion: ipv4 || 'N/A',

@@ -1,0 +1,11 @@
+{
+  "name": "netpulse-ai",
+  "version": "2.0.0",
+  "description": "NetPulse AI - Analizador y capturador de red local con interceptor propio",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "http-mitm-proxy": "^1.1.0",
+    "node-forge": "^1.3.1"
+  }
+}

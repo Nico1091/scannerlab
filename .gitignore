@@ -1,0 +1,6 @@
+# Datos locales y material sensible — nunca deben subir al repositorio
+captura/
+node_modules/
+*_db.json
+flujos.jsonl
+.env
