@@ -318,7 +318,7 @@ const OUI_DB = {
   'C0:BD:C8': 'Samsung', 'C0:D9:48': 'Samsung', 'C4:3A:BE': 'Samsung',
   'C4:42:68': 'Samsung', 'C4:57:6E': 'Samsung', 'C4:73:1E': 'Samsung',
   'C4:88:E5': 'Samsung', 'C4:9A:02': 'Samsung', 'C4:A5:59': 'Samsung',
-  'C4:D7:6E': 'Samsung', 'C4:E9:84': 'Samsung', 'C4:EE:V5': 'Samsung',
+  'C4:D7:6E': 'Samsung', 'C4:E9:84': 'Samsung',
   'C8:14:51': 'Samsung', 'C8:19:F7': 'Samsung', 'C8:1E:E7': 'Samsung',
   'C8:38:70': 'Samsung', 'C8:45:44': 'Samsung', 'C8:5B:76': 'Samsung',
   'C8:97:9C': 'Samsung', 'C8:9E:43': 'Samsung', 'C8:A8:98': 'Samsung',
@@ -689,31 +689,6 @@ async function getUPnPFriendlyName(locationUrl) {
   });
 }
 
-async function discoverMDNS() {
-  // Windows no tiene mDNS nativo, usamos PowerShell + Resolve-DnsName con .local
-  try {
-    const out = await run(`powershell -NoProfile -Command "
-      $ips = @('192.168.20.1'..'192.168.20.254')
-      $results = @()
-      foreach ($last in 1..254) {
-        $ip = '192.168.20.' + $last
-        try {
-          $name = (Resolve-DnsName $ip -Type PTR -ErrorAction SilentlyContinue).NameHost
-          if ($name) { $results += \"$ip|$name\" }
-        } catch {}
-      }
-      $results -join \"\`n\"
-    "`, 15000);
-    const map = {};
-    for (const line of out.split(/\r?\n/)) {
-      const [ip, name] = line.split('|');
-      if (ip && name && name.includes('.')) map[ip.trim()] = name.trim();
-    }
-    return map;
-  } catch (_) {
-    return {};
-  }
-}
 
 async function getHostname(ip, upnpDevices = {}) {
   // Si ya tenemos UPnP descubierto con friendlyName, usarlo
@@ -858,11 +833,9 @@ function inferirDispositivoCompleto(puertos, mac, ttl, hostname) {
   return null;
 }
 
-// Cache para resultados de LM Studio (evita re-consultar mismos dispositivos)
-const lmCache = new Map();
 
 // Base de datos local de dispositivos identificados (aprendizaje)
-const DEVICE_DB_PATH = path.join(__dirname, 'dispositivos_db.json');
+const DEVICE_DB_PATH = require('./config').DEVICES_FILE;
 function loadDeviceDB() {
   try {
     if (fs.existsSync(DEVICE_DB_PATH)) {
@@ -881,184 +854,8 @@ function saveDeviceDB(db) {
 const deviceDB = loadDeviceDB();
 
 // Buscar informacion de MAC address online via macvendors.com
-async function lookupMACOnline(mac) {
-  if (!mac || mac === 'N/A') return null;
-  const oui = mac.replace(/:/g, '').substring(0, 6).toUpperCase();
-  return new Promise((resolve) => {
-    const req = https.get(`https://api.macvendors.com/${mac}`, { timeout: 4000 }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        const clean = data.trim();
-        if (clean && !clean.includes('error') && !clean.includes('Not Found')) {
-          console.log(`[Web] MAC lookup ${mac} -> ${clean}`);
-          resolve(clean);
-        } else {
-          resolve(null);
-        }
-      });
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-  });
-}
-
-// Buscar en DuckDuckGo para obtener informacion de dispositivos
-async function searchWeb(query) {
-  return new Promise((resolve) => {
-    const encoded = encodeURIComponent(query);
-    const req = https.get(`https://html.duckduckgo.com/html/?q=${encoded}`, { timeout: 6000 }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          // Extraer snippets de resultados
-          const snippets = [];
-          const matches = data.match(/class="result__snippet"[^>]*>([^<]*)/g);
-          if (matches) {
-            matches.slice(0, 3).forEach(m => {
-              const text = m.replace(/class="result__snippet"[^>]*>/, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim();
-              if (text.length > 10) snippets.push(text);
-            });
-          }
-          if (snippets.length > 0) {
-            console.log(`[Web] Search "${query}" -> ${snippets.length} resultados`);
-            resolve(snippets.join(' | '));
-          } else {
-            resolve(null);
-          }
-        } catch (e) { resolve(null); }
-      });
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-  });
-}
-
-// Enriquecer datos del dispositivo con busquedas web
-async function enriquecerConWeb(dispositivo) {
-  const webInfo = {};
-  const promises = [];
-
-  // Buscar fabricante por MAC online
-  if (dispositivo.mac && dispositivo.mac !== 'N/A') {
-    promises.push(
-      lookupMACOnline(dispositivo.mac).then(r => { if (r) webInfo.macVendor = r; })
-    );
-  }
-
-  // Buscar info del hostname
-  if (dispositivo.hostname && dispositivo.hostname !== 'Desconocido') {
-    const h = dispositivo.hostname.replace('.local', '');
-    promises.push(
-      searchWeb(`${h} device model network`).then(r => { if (r) webInfo.hostnameSearch = r; })
-    );
-  }
-
-  // Buscar info por fabricante + tipo
-  if (dispositivo.fabricante && dispositivo.fabricante !== 'Desconocido') {
-    promises.push(
-      searchWeb(`${dispositivo.fabricante} ${dispositivo.tipo} MAC OUI`).then(r => { if (r) webInfo.vendorSearch = r; })
-    );
-  }
-
-  await Promise.all(promises);
-  return webInfo;
-}
-
-// Identificacion de dispositivos usando LM Studio con gemma-4-e2b + datos web
-async function identificarConLMStudio(dispositivo) {
-  const LM_STUDIO_URL = 'http://localhost:1234/v1/chat/completions';
-
-  // Usar cache por MAC para evitar re-consultas
-  const cacheKey = dispositivo.mac + dispositivo.hostname;
-  if (lmCache.has(cacheKey)) {
-    console.log(`[LM Studio] Cache hit para ${dispositivo.ip}`);
-    return lmCache.get(cacheKey);
-  }
-
-  // Enriquecer con datos de internet
-  console.log(`[Web] Buscando info online para ${dispositivo.ip}...`);
-  const webData = await enriquecerConWeb(dispositivo);
-
-  let webContext = '';
-  if (webData.macVendor) webContext += `\n- Fabricante confirmado online: ${webData.macVendor}`;
-  if (webData.hostnameSearch) webContext += `\n- Info del hostname en internet: ${webData.hostnameSearch.substring(0, 300)}`;
-  if (webData.vendorSearch) webContext += `\n- Busqueda del fabricante: ${webData.vendorSearch.substring(0, 300)}`;
-
-  const prompt = `Eres un experto en identificacion de dispositivos de red. Analiza estos datos y devuelve EXACTAMENTE el modelo del dispositivo (ej: "iPhone 14 Pro", "Xiaomi Redmi Note 12", "Samsung Galaxy S23", "LG OLED C3", "Router TP-Link Archer AX50", "Smart TV Samsung 55\"", etc.).
-
-Datos del dispositivo:
-- IP: ${dispositivo.ip}
-- MAC: ${dispositivo.mac}
-- Fabricante (OUI): ${dispositivo.fabricante}
-- Hostname: ${dispositivo.hostname}
-- Puertos abiertos: ${(dispositivo.puertos || []).join(', ') || 'Ninguno'}
-- TTL: ${dispositivo.ttl || 'Desconocido'}
-- Tipo inferido: ${dispositivo.tipo}
-- MAC local (randomizada): ${dispositivo.macLocal ? 'Si' : 'No'}${webContext}
-
-Responde UNICAMENTE con el nombre exacto del modelo. Si no puedes identificar el modelo exacto, responde "Desconocido". No incluyas explicaciones.`;
-
-  return new Promise((resolve) => {
-    const postData = JSON.stringify({
-      model: 'google/gemma-4-e2b',
-      messages: [
-        { role: 'system', content: 'Eres un experto en identificacion precisa de dispositivos de red. Responde SOLO con el nombre exacto del modelo, sin explicaciones ni razonamiento.' },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.1,
-      max_tokens: 500,
-      stream: false
-    });
-
-    const req = http.request(LM_STUDIO_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      },
-      timeout: 15000
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          const message = json.choices?.[0]?.message;
-          let content = message?.content?.trim();
-          // Modelos de razonamiento (gemma-4-e2b) pueden poner respuesta en reasoning_content
-          if (!content && message?.reasoning_content) {
-            content = message.reasoning_content.trim();
-          }
-          if (content && content !== 'Desconocido' && content.length > 2 && content.length < 120) {
-            // Limpiar razonamiento: extraer solo la linea con el modelo
-            const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-            const modelLine = lines.find(l => !l.toLowerCase().includes('thinking') && !l.toLowerCase().includes('process') && !l.toLowerCase().includes('analyze') && !l.toLowerCase().includes('determine') && !l.toLowerCase().includes('step'));
-            const final = modelLine || lines[lines.length - 1] || content;
-            const clean = final.replace(/^\d+\.\s*/, '').replace(/^-\s*/, '').replace(/^\*\s*/, '').trim();
-            if (clean && clean !== 'Desconocido' && clean.length > 2 && clean.length < 120) {
-              console.log(`[LM Studio] ${dispositivo.ip} -> ${clean}`);
-              lmCache.set(cacheKey, clean);
-              resolve(clean);
-              return;
-            }
-          }
-          lmCache.set(cacheKey, null);
-          resolve(null);
-        } catch (e) {
-          lmCache.set(cacheKey, null);
-          resolve(null);
-        }
-      });
-    });
-
-    req.on('error', () => { lmCache.set(cacheKey, null); resolve(null); });
-    req.on('timeout', () => { lmCache.set(cacheKey, null); req.destroy(); resolve(null); });
-    req.write(postData);
-    req.end();
-  });
-}
+// La identificación es determinista: hostname, UPnP, mDNS, OUI, puertos y TTL.
+// No hay consultas a modelos de lenguaje ni a servicios externos.
 
 function scanPort(ip, port, timeout = 1500) {
   return new Promise((resolve) => {
@@ -1078,60 +875,6 @@ async function scanPorts(ip) {
   return results.filter(r => r.open).map(r => r.port);
 }
 
-async function grabBanner(ip, port, timeout = 1500) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let data = '';
-    socket.setTimeout(timeout);
-    socket.on('connect', () => {
-      if (port === 22) { /* SSH envia banner automatico */ }
-      else { socket.write('HEAD / HTTP/1.0\r\n\r\n'); }
-    });
-    socket.on('data', (chunk) => {
-      data += chunk.toString();
-      if (data.length > 512 || data.includes('\n')) { socket.destroy(); resolve(data.slice(0, 300)); }
-    });
-    socket.on('timeout', () => { socket.destroy(); resolve(data.slice(0, 300)); });
-    socket.on('error', () => { socket.destroy(); resolve(data.slice(0, 300)); });
-    socket.connect(port, ip);
-  });
-}
-
-function identificarPorPuertos(puertos, mac) {
-  const p = new Set(puertos);
-  const macU = mac.toUpperCase();
-  const oui = macU.slice(0, 8);
-
-  // iPhone / iPad
-  if (p.has(62078)) return { tipo: 'Movil/Tablet', nombre: 'iPhone / iPad (Apple)' };
-  if (oui.startsWith('AC:DE:48') || oui.startsWith('F0:18:98') || macU.startsWith('02:00:00')) {
-    if (p.has(80) || p.has(443)) return { tipo: 'Movil/Tablet', nombre: 'iPhone / iPad (Apple)' };
-  }
-
-  // Android ADB
-  if (p.has(5555)) return { tipo: 'Movil/Tablet', nombre: 'Android (Modo Desarrollo)' };
-
-  // Router / Gateway
-  if (p.has(80) && p.has(5000)) return { tipo: 'Router / AP', nombre: 'Router UPnP' };
-
-  // Windows PC
-  if (p.has(445) || p.has(3389)) return { tipo: 'PC / Laptop', nombre: 'Windows PC' };
-
-  // NAS / Servidor
-  if (p.has(5000) || p.has(5001)) return { tipo: 'NAS / Servidor', nombre: 'Synology NAS' };
-  if (p.has(32400)) return { tipo: 'Media Server', nombre: 'Plex Media Server' };
-  if (p.has(8123)) return { tipo: 'Smart Home', nombre: 'Home Assistant' };
-
-  // Linux / Servidor
-  if (p.has(22)) return { tipo: 'Servidor / Linux', nombre: 'Servidor SSH' };
-
-  // Web
-  if (p.has(80) || p.has(443) || p.has(8080) || p.has(8443)) {
-    return { tipo: 'Dispositivo con Web', nombre: 'Dispositivo con Interfaz Web' };
-  }
-
-  return null;
-}
 
 function detectarTipo(fabricante, ip, gatewayIp) {
   if (ip === gatewayIp) return 'Router / Gateway';
@@ -1330,34 +1073,21 @@ async function obtenerDispositivos(gatewayIp) {
     }
   }
 
-  // 13. Consultar LM Studio para dispositivos no identificados (excluyendo los ya en DB)
-  const genericosParaLM = ['Dispositivo Genérico', 'Movil/Tablet', 'Dispositivo LG', 'Dispositivo Sony', 'Dispositivo Samsung', 'Dispositivo Apple', 'Dispositivo Xiaomi / Redmi', 'Dispositivo Huawei / Honor', 'Dispositivo OPPO', 'Dispositivo Vivo', 'Dispositivo OnePlus', 'Dispositivo Realme', 'Dispositivo Motorola', 'Dispositivo Nokia', 'Dispositivo Google / Nest', 'Dispositivo Amazon / Alexa', 'Dispositivo Microsoft', 'Dispositivo con Web'];
-  const dispositivosParaLM = dispositivosPre.filter(d =>
-    (genericosParaLM.includes(d.tipo) || d.hostname === 'Desconocido') &&
-    d.mac !== 'N/A' && !deviceDB.has(d.mac)
-  );
-
-  if (dispositivosParaLM.length > 0) {
-    console.log(`[Dispositivos] Consultando LM Studio para ${dispositivosParaLM.length} dispositivos...`);
-    const lmResults = await runInBatches(dispositivosParaLM, async (d) => {
-      const lmName = await identificarConLMStudio(d);
-      return { ip: d.ip, mac: d.mac, lmName };
-    }, 3); // Solo 3 en paralelo para no saturar LM Studio
-
-    // Aplicar resultados de LM Studio y guardar en DB
-    for (const d of dispositivosPre) {
-      const lmResult = lmResults[d.ip];
-      if (lmResult && lmResult !== 'Desconocido') {
-        d.hostname = lmResult;
-        console.log(`[Dispositivos] ${d.ip} identificado por LM Studio como: ${lmResult}`);
-        // Guardar en DB local para aprendizaje futuro
-        if (d.mac !== 'N/A') {
-          deviceDB.set(d.mac, lmResult);
-        }
-      }
+  // La identificación determinista de los pasos anteriores es la definitiva.
+  // Los nombres resueltos de forma fiable (hostname real, UPnP o mDNS) se
+  // recuerdan para las próximas exploraciones: sustituye al aprendizaje que
+  // antes venía del modelo de lenguaje, sin depender de nada externo.
+  let aprendidos = 0;
+  for (const d of dispositivosPre) {
+    if (d.mac && d.mac !== 'N/A' && d.hostname && d.hostname !== 'Desconocido'
+        && !deviceDB.has(d.mac)) {
+      deviceDB.set(d.mac, d.hostname);
+      aprendidos++;
     }
+  }
+  if (aprendidos) {
     saveDeviceDB(deviceDB);
-    console.log(`[DB] Guardados ${dispositivosParaLM.length} dispositivos en base de datos local`);
+    console.log(`[DB] ${aprendidos} dispositivos recordados por identificación determinista`);
   }
 
   // 14. Lista final

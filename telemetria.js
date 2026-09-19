@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const HIST_FILE = path.join(__dirname, 'telemetria_db.json');
+const HIST_FILE = require('./config').HIST_FILE;
 
 // ---------------------------------------------------------------------------
 // Utilidades

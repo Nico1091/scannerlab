@@ -7,6 +7,12 @@
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const cfg = require('./config');
+
+// Emisor real de la autoridad que crea http-mitm-proxy. Buscar por este nombre
+// (y no por 'mitmproxy', que nunca aparece) es lo que hace que el certificado
+// se detecte y se retire de verdad.
+const EMISOR = cfg.CA_ISSUER;
 
 const KEY = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
 
@@ -46,8 +52,14 @@ async function proxyActivo() {
 }
 
 async function certConfiado() {
-  const r = await ps("(Get-ChildItem Cert:\\CurrentUser\\Root -EA SilentlyContinue | Where-Object { $_.Issuer -match 'mitmproxy|NetPulse|http-mitm' }).Count");
+  const r = await ps("@(Get-ChildItem Cert:\\CurrentUser\\Root -EA SilentlyContinue | Where-Object { $_.Issuer -match '" + EMISOR + "' }).Count");
   return parseInt(r.out || '0', 10) > 0;
+}
+
+// Huellas de los certificados del interceptor que están confiados ahora mismo.
+async function huellasCert() {
+  const r = await ps("@(Get-ChildItem Cert:\\CurrentUser\\Root -EA SilentlyContinue | Where-Object { $_.Issuer -match '" + EMISOR + "' } | ForEach-Object { $_.Thumbprint }) -join ','");
+  return (r.out || '').split(',').map((x) => x.trim()).filter(Boolean);
 }
 
 // Confía el certificado del interceptor en el almacén del USUARIO (no requiere admin)
@@ -60,17 +72,27 @@ async function confiarCert(rutaPem) {
 }
 
 async function olvidarCert() {
-  await ps("Get-ChildItem Cert:\\CurrentUser\\Root -EA SilentlyContinue | Where-Object { $_.Issuer -match 'mitmproxy|NetPulse|http-mitm' } | Remove-Item -Force -EA SilentlyContinue");
+  // Se retira por huella exacta: ningún otro certificado del usuario se toca.
+  for (const h of await huellasCert()) {
+    await ps("Remove-Item -Path 'Cert:\\CurrentUser\\Root\\" + h + "' -Force -EA SilentlyContinue");
+  }
   return { ok: true };
 }
 
-// Revertido síncrono de emergencia (al cerrar el servidor): deja el equipo con internet
+// Revertido síncrono de emergencia (al cerrar el servidor o ante un fallo no
+// capturado): devuelve el internet Y retira el certificado. Dejar la confianza
+// puesta con el proxy caído sería peor que no haber interceptado nunca.
+let yaRevertido = false;
 function revertirSync() {
+  if (yaRevertido) return;
+  yaRevertido = true;
+  const cmd = "Set-ItemProperty -Path '" + KEY + "' -Name ProxyEnable -Value 0; " +
+    "Get-ChildItem Cert:\CurrentUser\Root -EA SilentlyContinue | " +
+    "Where-Object { $_.Issuer -match '" + EMISOR + "' } | Remove-Item -Force -EA SilentlyContinue";
   try {
-    require('child_process').execSync(
-      "powershell -NoProfile -Command \"Set-ItemProperty -Path '" + KEY.replace('HKCU:', 'HKCU:') + "' -Name ProxyEnable -Value 0\"",
-      { timeout: 8000, windowsHide: true });
+    require('child_process').execSync('powershell -NoProfile -NonInteractive -Command "' + cmd.replace(/"/g, '\\"') + '"',
+      { timeout: 12000, windowsHide: true });
   } catch {}
 }
 
-module.exports = { activarProxy, desactivarProxy, proxyActivo, confiarCert, olvidarCert, certConfiado, revertirSync };
+module.exports = { activarProxy, desactivarProxy, proxyActivo, confiarCert, olvidarCert, certConfiado, huellasCert, revertirSync };

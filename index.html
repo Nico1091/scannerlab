@@ -4,6 +4,23 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetPulse AI | Analizador Corporativo de Red</title>
+  <meta name="netpulse-token" content="__NETPULSE_TOKEN__">
+  <script>
+  // El servidor incrusta aquí el testigo de esta sesión al servir la página.
+  // Se añade a toda llamada a /api/ sin tocar cada punto de uso.
+  (function(){
+    var t=document.querySelector('meta[name="netpulse-token"]').content;
+    var f=window.fetch;
+    window.fetch=function(url,opts){
+      if(typeof url==='string'&&url.indexOf('/api/')===0){
+        opts=opts||{};
+        opts.headers=Object.assign({},opts.headers,{'X-NetPulse-Token':t});
+      }
+      return f(url,opts);
+    };
+  })();
+  </script>
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
@@ -779,7 +796,7 @@
     </div>
 
     <footer>
-      NetPulse AI v1.0 &middot; Datos recolectados localmente &middot; Conectado a LM Studio localhost:1234
+      NetPulse AI v1.0 &middot; Datos recolectados localmente &middot; Identificación determinista, sin servicios externos
     </footer>
   </div>
 

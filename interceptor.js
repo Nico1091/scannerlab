@@ -11,15 +11,15 @@ const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 
-const BASE = __dirname;
-const CAP = path.join(BASE, 'captura');
-const CA_DIR = path.join(CAP, 'ca');           // aquí http-mitm-proxy crea su CA
-const MEDIA = path.join(CAP, 'media');          // imágenes y videos capturados
-const FLOWS = path.join(CAP, 'flujos.jsonl');
-const CA_CERT = path.join(CA_DIR, 'certs', 'ca.pem');
-const PUERTO = 8080;
+const cfg = require('./config');
 
-for (const d of [CAP, MEDIA]) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
+// Las rutas viven fuera del árbol del proyecto (ver config.js): la clave de la
+// autoridad certificadora nunca debe quedar al alcance del servidor de archivos.
+const CA_DIR = cfg.CA_DIR;
+const MEDIA = cfg.MEDIA_DIR;
+const FLOWS = cfg.FLOWS_FILE;
+const CA_CERT = path.join(CA_DIR, 'certs', 'ca.pem');
+const PUERTO = cfg.PUERTO_PROXY;
 
 const MAX_MEDIA_BYTES = 6 * 1024 * 1024;   // no guardar medios > 6 MB
 const MAX_MEDIA_FILES = 500;
@@ -167,7 +167,7 @@ function finalizar(np) {
       const fname = h + '.' + EXT[np.tipo];
       const fpath = path.join(MEDIA, fname);
       if (!fs.existsSync(fpath)) { fs.writeFileSync(fpath, body); mediaCount++; estado.medios++; }
-      rec.media = 'captura/media/' + fname;
+      rec.media = '/media/' + fname;
       rec.mtipo = np.cat;
     } catch {}
   }
@@ -211,7 +211,7 @@ function medios(limite = 200) {
     return fs.readdirSync(MEDIA)
       .map((f) => ({ f, t: fs.statSync(path.join(MEDIA, f)).mtimeMs }))
       .sort((a, b) => b.t - a.t).slice(0, limite)
-      .map((x) => 'captura/media/' + x.f);
+      .map((x) => '/media/' + x.f);
   } catch { return []; }
 }
 

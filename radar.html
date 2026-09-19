@@ -3,6 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="netpulse-token" content="__NETPULSE_TOKEN__">
+<script>
+// El servidor incrusta aquí el testigo de esta sesión al servir la página.
+// Se añade a toda llamada a /api/ sin tocar cada punto de uso.
+(function(){
+  var t=document.querySelector('meta[name="netpulse-token"]').content;
+  var f=window.fetch;
+  window.fetch=function(url,opts){
+    if(typeof url==='string'&&url.indexOf('/api/')===0){
+      opts=opts||{};
+      opts.headers=Object.assign({},opts.headers,{'X-NetPulse-Token':t});
+    }
+    return f(url,opts);
+  };
+})();
+</script>
+
 <title>NetPulse Radar</title>
 <style>
   :root{
@@ -169,18 +186,18 @@
       <div class="card kpi"><h3>Proxy</h3><div><span class="val" id="int-proxy" style="font-size:20px">—</span></div></div>
       <div class="card kpi"><h3>Certificado</h3><div><span class="val" id="int-cert" style="font-size:20px">—</span></div></div>
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <h3>Imágenes y videos capturados del tráfico real</h3>
+      <div class="wall" id="int-galeria"><div class="empty">Activa la intercepción y navega para ver aquí las imágenes reales.</div></div>
+    </div>
     <div class="tabs" style="margin-bottom:14px">
       <button class="tab active subtab" data-sv="feed">Tráfico en vivo</button>
-      <button class="tab subtab" data-sv="galeria">Galería (imágenes/video)</button>
       <button class="tab subtab" data-sv="mensajes">Contenido / mensajes</button>
     </div>
     <div class="subview" id="sv-feed">
       <div class="card"><h3>Peticiones descifradas en tiempo real</h3>
         <div style="overflow-x:auto"><table id="tbl-int"><thead><tr><th>Hora</th><th>Método</th><th>Sitio</th><th>Ruta</th><th>Tipo</th><th>Tamaño</th></tr></thead><tbody></tbody></table></div>
       </div>
-    </div>
-    <div class="subview" id="sv-galeria" hidden>
-      <div class="card"><h3>Imágenes y videos capturados del tráfico real</h3><div class="wall" id="int-galeria"><div class="empty">Activa la intercepción y navega para ver aquí las imágenes reales.</div></div></div>
     </div>
     <div class="subview" id="sv-mensajes" hidden>
       <div class="card"><h3>Contenido descifrado · datos, JSON y mensajes</h3><div id="int-mensajes"><div class="empty">Aquí aparece el texto descifrado (respuestas JSON, formularios enviados, búsquedas).</div></div></div>
@@ -327,9 +344,28 @@ async function refrescarInt(){
     $('#int-cert').innerHTML=st.certConfiado?'<span style="color:var(--accent)">✓</span>':'<span style="color:var(--warn)">—</span>';
     const f=(await (await fetch('/api/interceptor/flujos')).json()).data;
     $('#tbl-int tbody').innerHTML=f.flujos.map(x=>`<tr><td class="cat">${fmtHora(x.ts)}</td><td class="proc">${x.metodo}</td><td>${favicon(x.host)?`<img class="fav" src="${favicon(x.host)}" onerror="this.style.visibility='hidden'">`:''}${x.host}</td><td class="cat" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${x.ruta}">${x.ruta}</td><td><span style="color:${catColor(x.categoria)}">${catIco[x.categoria]||'•'} ${x.categoria}</span></td><td class="cat">${fmtBytes(x.bytes)}</td></tr>`).join('')||'<tr><td colspan=6 class="empty">Aún sin tráfico. Navega con el modo activo.</td></tr>';
-    // galería
+    // galería — se insertan solo los medios nuevos, identificados por su nombre
+    // de archivo (hash del contenido). Rehacer el muro entero era lo que hacía
+    // parpadear las imágenes en cada refresco.
     const m=(await (await fetch('/api/interceptor/medios')).json()).data;
-    $('#int-galeria').innerHTML=m.length?m.map(src=>{const vid=/\.(mp4|webm|mov)$/.test(src);return `<div class="site" style="padding:0;overflow:hidden">${vid?`<video src="/${src}" style="width:100%;height:120px;object-fit:cover" muted></video>`:`<img src="/${src}" style="width:100%;height:120px;object-fit:cover;border-radius:0;margin:0" loading="lazy">`}</div>`;}).join(''):'<div class="empty">Sin imágenes todavía</div>';
+    const muro=$('#int-galeria');
+    if(m.length){
+      const vacio=muro.querySelector('.empty'); if(vacio) muro.innerHTML='';
+      for(const src of m){
+        const clave=src.split('/').pop();
+        if(muro.querySelector('[data-medio="'+clave+'"]')) continue;
+        const cel=document.createElement('div');
+        cel.className='site'; cel.style.cssText='padding:0;overflow:hidden';
+        cel.dataset.medio=clave;
+        const vid=/\.(mp4|webm|mov)$/.test(src);
+        const el=document.createElement(vid?'video':'img');
+        el.src=src;            // ya viene como /media/<archivo>
+        el.style.cssText='width:100%;height:120px;object-fit:cover;border-radius:0;margin:0';
+        if(vid){el.muted=true;} else {el.loading='lazy';}
+        cel.appendChild(el);
+        muro.prepend(cel);     // lo más reciente, arriba
+      }
+    }
     // mensajes / contenido
     const conBody=f.flujos.filter(x=>x.contenido||x.envio);
     $('#int-mensajes').innerHTML=conBody.length?conBody.slice(0,40).map(x=>`<div style="border:1px solid var(--line);border-radius:10px;padding:11px 13px;margin-bottom:9px;background:var(--panel)"><div class="flex" style="justify-content:space-between;margin-bottom:5px"><span class="proc">${x.metodo} · ${x.host}</span><span class="cat">${fmtHora(x.ts)}</span></div>${x.envio?`<div style="color:var(--warn);font-size:12.5px;margin-bottom:4px"><b>Enviado →</b> <span style="font-family:var(--mono)">${escapeHtml(x.envio).slice(0,400)}</span></div>`:''}${x.contenido?`<div style="font-family:var(--mono);font-size:12px;color:var(--dim);white-space:pre-wrap;max-height:120px;overflow:auto">${escapeHtml(x.contenido)}</div>`:''}</div>`).join(''):'<div class="empty">Aún sin contenido de texto descifrado</div>';

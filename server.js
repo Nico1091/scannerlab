@@ -5,7 +5,12 @@ const { obtenerDatos, obtenerDispositivos, obtenerInfoDetalladaDispositivo, look
 const tele = require('./telemetria');
 const interceptor = require('./interceptor');
 const sistema = require('./sistema');
+const cfg = require('./config');
+
+// El equipo nunca puede quedarse sin internet ni con un certificado ajeno
+// confiado: toda salida del proceso revierte el proxy y retira el certificado.
 process.on('SIGINT', () => { try { sistema.revertirSync(); } catch {} process.exit(0); });
+process.on('SIGTERM', () => { try { sistema.revertirSync(); } catch {} process.exit(0); });
 process.on('exit', () => { try { sistema.revertirSync(); } catch {} });
 
 // Cache del ultimo escaneo de dispositivos para la auditoria de red
@@ -14,12 +19,14 @@ let lastDevicesCache = { data: [], datos: null, ts: 0 };
 // Manejo de errores no capturados para evitar crash del servidor
 process.on('uncaughtException', (err) => {
   console.error('[ERROR NO CAPTURADO]', err);
+  try { sistema.revertirSync(); } catch {}
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[PROMESA RECHAZADA]', reason);
+  try { sistema.revertirSync(); } catch {}
 });
 
-let PORT = 3001;
+let PORT = cfg.PORT;
 
 // Cache del ultimo escaneo de dispositivos (para pasar MAC al endpoint de detalle)
 let lastDeviceCache = {};
@@ -87,19 +94,36 @@ const MIME = {
 
 function startServer(port) {
   const srv = http.createServer(async (req, res) => {
-    // CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // Sin CORS abierto: ninguna página ajena debe poder leer lo que hay aquí.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
 
     if (req.method === 'OPTIONS') {
-      res.writeHead(204);
+      res.writeHead(405);
       res.end();
       return;
     }
 
-    // ===== Endpoints de telemetría (NetPulse Radar) =====
     const jsend = (obj, code = 200) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+
+    // Solo se atiende a quien llega por el nombre local: corta el reenlace de DNS.
+    const anfitrion = (req.headers.host || '').split(':')[0];
+    if (anfitrion && !['127.0.0.1', 'localhost', '[::1]', '::1'].includes(anfitrion)) {
+      return jsend({ ok: false, error: 'Anfitrión no permitido' }, 403);
+    }
+
+    // El testigo viaja incrustado en el HTML que sirve este mismo servidor, de
+    // modo que una página de otro origen no puede leerlo ni suplantar al usuario.
+    const esApi = req.url.startsWith('/api/');
+    if (esApi) {
+      const enviado = req.headers['x-netpulse-token']
+        || (req.url.match(/[?&]token=([a-f0-9]{48})/) || [])[1] || '';
+      if (enviado !== cfg.TOKEN) {
+        return jsend({ ok: false, error: 'Testigo ausente o inválido' }, 401);
+      }
+    }
+
+    // ===== Endpoints de telemetría (NetPulse Radar) =====
 
     if (req.url === '/api/tele/conexiones') {
       try { jsend({ ok: true, data: await tele.conexiones() }); }
@@ -170,8 +194,11 @@ function startServer(port) {
     if (req.url === '/api/interceptor/stop' && req.method === 'POST') {
       try {
         await sistema.desactivarProxy();
+        // Retirar también la confianza: el certificado sin proxy detrás es un
+        // riesgo abierto, y era lo que quedaba puesto al desactivar.
+        await sistema.olvidarCert();
         await interceptor.detener();
-        jsend({ ok: true, estado: interceptor.status() });
+        jsend({ ok: true, estado: interceptor.status(), certRetirado: true });
       } catch (e) { jsend({ ok: false, error: e.message }, 500); }
       return;
     }
@@ -229,6 +256,11 @@ function startServer(port) {
     const deviceMatch = req.url.match(/^\/api\/device\/(.+)$/);
     if (deviceMatch) {
       const targetIp = decodeURIComponent(deviceMatch[1]);
+      if (!cfg.esIPv4(targetIp)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Dirección IPv4 no válida' }));
+        return;
+      }
       try {
         const info = await obtenerInfoDetalladaDispositivo(targetIp);
         // Usar MAC del cache del escaneo principal si no se detecto
@@ -249,6 +281,11 @@ function startServer(port) {
     const pingMatch = req.url.match(/^\/api\/ping\/(.+)$/);
     if (pingMatch) {
       const targetIp = decodeURIComponent(pingMatch[1]);
+      if (!cfg.esIPv4(targetIp)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Dirección IPv4 no válida' }));
+        return;
+      }
       try {
         const ms = await pingLive(targetIp);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -286,43 +323,63 @@ function startServer(port) {
       return;
     }
 
-    // SPA catch-all -> index.html
-    const filePath = req.url === '/' || !path.extname(req.url)
-      ? path.join(__dirname, 'index.html')
-      : path.join(__dirname, req.url);
-
-    const ext = path.extname(filePath);
-    const contentType = MIME[ext] || 'application/octet-stream';
-
-    fs.readFile(filePath, (err, data) => {
-      if (err) {
-        if (err.code === 'ENOENT' && req.url !== '/') {
-          fs.readFile(path.join(__dirname, 'index.html'), (e2, html) => {
-            if (e2) {
-              res.writeHead(404, { 'Content-Type': 'text/plain' });
-              res.end('Not found');
-            } else {
-              res.writeHead(200, { 'Content-Type': 'text/html' });
-              res.end(html);
-            }
-          });
-        } else {
-          res.writeHead(500, { 'Content-Type': 'text/plain' });
-          res.end('Server error');
-        }
-      } else {
-        res.writeHead(200, { 'Content-Type': contentType });
-        res.end(data);
+    // ===== Medios capturados: ruta propia, nombre validado =====
+    const mediaMatch = req.url.match(/^\/media\/([^/?#]+)$/);
+    if (mediaMatch) {
+      const nombre = decodeURIComponent(mediaMatch[1]);
+      if (!cfg.RE_MEDIA.test(nombre)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Nombre de medio no válido');
+        return;
       }
+      const fpath = path.join(cfg.MEDIA_DIR, nombre);
+      // Doble cierre: aunque el nombre ya está validado, se comprueba que la
+      // ruta resuelta siga dentro de la carpeta de medios.
+      if (path.dirname(path.resolve(fpath)) !== path.resolve(cfg.MEDIA_DIR)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Prohibido');
+        return;
+      }
+      fs.readFile(fpath, (err, data) => {
+        if (err) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('No encontrado'); return; }
+        res.writeHead(200, { 'Content-Type': MIME[path.extname(nombre)] || 'application/octet-stream' });
+        res.end(data);
+      });
+      return;
+    }
+
+    // ===== Archivos servidos: solo los de la lista blanca =====
+    // Nunca se sirve el árbol del proyecto: así ni la clave de la autoridad
+    // certificadora ni los flujos capturados pueden pedirse por URL.
+    const ruta = req.url.split('?')[0];
+    const solicitado = (ruta === '/' || !path.extname(ruta)) ? '/index.html' : ruta;
+
+    if (!cfg.ARCHIVOS_PUBLICOS.has(solicitado)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('No encontrado');
+      return;
+    }
+
+    fs.readFile(path.join(__dirname, solicitado.slice(1)), 'utf8', (err, html) => {
+      if (err) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Error del servidor');
+        return;
+      }
+      // El testigo de la sesión se incrusta aquí: el navegador lo recibe con la
+      // página y ninguna web ajena puede leerlo.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html.replace(/__NETPULSE_TOKEN__/g, cfg.TOKEN));
     });
   });
 
-  srv.listen(port, '0.0.0.0', () => {
+  srv.listen(port, cfg.BIND, () => {
     console.log(`\n========================================`);
     console.log(`  NetPulse AI - Servidor Online`);
     console.log(`========================================`);
     console.log(`  Abre tu navegador en:`);
-    console.log(`  http://localhost:${port}`);
+    console.log(`  http://127.0.0.1:${port}`);
+    console.log(`  (solo este equipo — enlace en ${cfg.BIND})`);
     console.log(`========================================\n`);
   });
 
