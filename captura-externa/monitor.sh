@@ -76,7 +76,9 @@ cmd_estado() {
     [ "$hay" = 0 ] && rojo "  ninguno (el USB no esta pasado a WSL)"
     echo
     echo "=== Driver ==="
-    if lsmod 2>/dev/null | grep -q rtl8xxxu; then
+    # lsmod dentro del contenedor no ve los modulos del anfitrion: hay que
+    # preguntarle a /proc/modules, que si esta compartido con el.
+    if grep -q '^rtl8xxxu ' /proc/modules 2>/dev/null; then
         verde "  rtl8xxxu cargado"
     else
         echo "  rtl8xxxu NO cargado"

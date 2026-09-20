@@ -1,0 +1,16 @@
+[Unit]
+# Se instala en WSL2 con:
+#   sudo cp firmware-wsl.sh /usr/local/sbin/netpulse-firmware.sh
+#   sudo cp netpulse-firmware.service /etc/systemd/system/
+#   sudo systemctl enable --now netpulse-firmware.service
+Description=NetPulse: firmware del adaptador externo al alcance del kernel de WSL
+After=local-fs.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/netpulse-firmware.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -56,8 +56,10 @@ function Get-IpWsl {
     (& wsl -d $DISTRO -u root -- hostname -I).Trim().Split(' ')[0]
 }
 
+# Los argumentos van en un array explicito, no sueltos: PowerShell tomaria
+# '-v' o '--rm' por parametros suyos y los robaria antes de llegar a wsl.
 function Wsl-Root {
-    param([Parameter(ValueFromRemainingArguments)][string[]]$Cmd)
+    param([string[]]$Cmd)
     & wsl -d $DISTRO -u root -- @Cmd
 }
 
@@ -97,11 +99,23 @@ function Stop-Tunel {
 }
 
 function Invoke-Contenedor {
-    param([Parameter(ValueFromRemainingArguments)][string[]]$Cmd)
+    param([string[]]$Cmd)
     if (-not (Test-Path $SALIDA)) { New-Item -ItemType Directory -Path $SALIDA -Force | Out-Null }
-    $montaje = (& wsl -d $DISTRO -- wslpath -a ($SALIDA -replace '\', '/')).Trim()
-    Wsl-Root docker run --rm --network host --cap-add NET_ADMIN --cap-add NET_RAW `
-        -v "${montaje}:/captura/salida" $IMAGEN @Cmd
+    # Docker exige el destino en minusculas, y la ruta de Windows no lo esta:
+    # se monta una ruta de Linux que apunta a la misma carpeta.
+    $montaje = '/mnt/wsl/netpulse-salida'
+    $origen = (& wsl -d $DISTRO -- wslpath -a $SALIDA.Replace('\', '/')).Trim()
+    Wsl-Root @('mkdir', '-p', $montaje)
+    Wsl-Root @('mountpoint', '-q', $montaje)
+    if ($LASTEXITCODE -ne 0) { Wsl-Root @('mount', '--bind', $origen, $montaje) }
+    Wsl-Root (@(
+        'docker', 'run', '--rm',
+        '--network', 'host',
+        '--cap-add', 'NET_ADMIN',
+        '--cap-add', 'NET_RAW',
+        '-v', "${montaje}:/captura/salida",
+        $IMAGEN
+    ) + $Cmd)
 }
 
 function Orden-Estado {
@@ -112,30 +126,38 @@ function Orden-Estado {
     Test-InternetIntacto | Out-Null
     Info ''
     Info '=== Dentro de WSL2 ==='
-    Invoke-Contenedor estado
+    Invoke-Contenedor @('estado')
 }
 
 function Orden-Iniciar {
     $usbipd = Get-Usbipd
 
+    # 'Shared' = compartido y libre;  'Attached' = ya pasado a Linux.
     $linea = & $usbipd list | Select-String -Pattern "^$BUSID\s"
-    if ($linea -and $linea -notmatch 'Shared') {
-        Mal "El adaptador no esta compartido. Una sola vez, como administrador:"
+    if ($linea -and $linea -notmatch 'Shared|Attached') {
+        Mal 'El adaptador no esta compartido. Una sola vez, como administrador:'
         Mal "    usbipd bind --busid $BUSID"
         exit 1
     }
 
-    Info 'Abriendo el tunel hacia WSL2...'
-    Start-Tunel
+    if ($linea -match 'Attached') {
+        Info 'El adaptador ya esta en Linux; no hace falta reconectarlo.'
+    }
+    else {
+        Info 'Abriendo el tunel hacia WSL2...'
+        Start-Tunel
 
-    Info 'Conectando el adaptador a Linux...'
-    Wsl-Root /usr/local/sbin/usbip attach -r 127.0.0.1 -b $BUSID
-    if ($LASTEXITCODE -ne 0) { Mal 'No se pudo conectar el adaptador.'; Stop-Tunel; exit 1 }
-    Start-Sleep -Seconds 5
+        Info 'Conectando el adaptador a Linux...'
+        Wsl-Root @('/usr/local/sbin/usbip', 'attach', '-r', '127.0.0.1', '-b', $BUSID)
+        if ($LASTEXITCODE -ne 0) { Mal 'No se pudo conectar el adaptador.'; Stop-Tunel; exit 1 }
+        # La enumeracion por el tunel tarda cerca de un minuto en completarse.
+        Info 'Esperando a que Linux lo reconozca (puede tardar un minuto)...'
+        Start-Sleep -Seconds 60
+    }
 
     Info 'Poniendo el adaptador en modo monitor...'
-    Invoke-Contenedor monitor
-    if ($Canal -gt 0) { Invoke-Contenedor canal "$Canal" }
+    Invoke-Contenedor @('monitor')
+    if ($Canal -gt 0) { Invoke-Contenedor @('canal', "$Canal") }
 
     Info ''
     Test-InternetIntacto | Out-Null
@@ -143,22 +165,22 @@ function Orden-Iniciar {
 
 function Orden-Capturar {
     Info "Capturando $Segundos segundos..."
-    Invoke-Contenedor capturar "$Segundos"
+    Invoke-Contenedor @('capturar', "$Segundos")
     Info "Los archivos quedan en: $SALIDA"
     Test-InternetIntacto | Out-Null
 }
 
 function Orden-Resumen {
     Info "Resumiendo $Segundos segundos de trafico..."
-    Invoke-Contenedor resumen "$Segundos"
+    Invoke-Contenedor @('resumen', "$Segundos")
     Info "Los archivos quedan en: $SALIDA"
 }
 
 function Orden-Detener {
     Info 'Devolviendo el adaptador a modo normal...'
-    try { Invoke-Contenedor gestionado } catch { }
+    try { Invoke-Contenedor @('gestionado') } catch { }
     Info 'Desconectando el adaptador de Linux...'
-    try { Wsl-Root /usr/local/sbin/usbip detach -p 00 } catch { }
+    try { Wsl-Root @('/usr/local/sbin/usbip', 'detach', '-p', '00') } catch { }
     Stop-Tunel
     Bien 'Listo. El adaptador vuelve a estar en Windows.'
     Test-InternetIntacto | Out-Null

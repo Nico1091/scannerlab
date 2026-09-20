@@ -146,18 +146,67 @@ Verificado en vivo: Linux **ve el adaptador** por el túnel
 (`TL-WN823N v2/v3 [Realtek RTL8192EU]`) y el USB **entra** en Linux
 (`vhci_hcd: Device attached`).
 
-### Lo único que falta comprobar
 
-Tras el `attach`, la enumeración USB **se quedó a medias**: el último mensaje del
-núcleo es `SetAddress Request`, y no llega el `New USB device found` que precede a
-la carga del driver. Faltaba el firmware, que **ya está instalado**; hay que repetir
-el `attach` y mirar el `dmesg`. Si el atasco persiste, la sospecha es la latencia del
-túnel durante la enumeración, y se prueba con `-o Compression=no` o pasando el
-dispositivo con el adaptador ya alimentado.
+### La última trampa: dónde busca el firmware el kernel de WSL
 
-**No se dejó nada corriendo**: el adaptador está devuelto a Windows y el túnel cerrado.
+Con el driver ya cargado, el arranque del adaptador fallaba así:
 
-### Cómo se usa (cuando haya alguien delante)
+    Direct firmware load for rtlwifi/rtl8192eu_nic.bin failed with error -2
+    Fatal - failed to load firmware
+    probe with driver rtl8xxxu failed with error -11
+
+El archivo **estaba** en `/lib/firmware/rtlwifi/`, con permisos correctos y legible.
+El `-2` es «no existe», y aun así existía. Dos cosas lo explican, y ninguna es obvia:
+
+1. **El firmware de Ubuntu viene en `.zst`**, y este kernel solo descomprime `.xz`
+   (`CONFIG_FW_LOADER_COMPRESS_ZSTD` no está activado). Hay que dejarlo descomprimido.
+2. **El kernel de WSL2 no busca en el sistema de archivos de Ubuntu.** Busca en el
+   suyo propio, el del init de WSL, que es otro y no tiene `/lib/firmware`. Por eso
+   ninguna ruta de Ubuntu le vale, ni siquiera apuntándole con
+   `firmware_class.path`.
+
+Se vio activando la depuración del cargador (`CONFIG_FW_LOADER_DEBUG=y` viene puesto):
+
+    echo "file drivers/base/firmware_loader/main.c +p" > /sys/kernel/debug/dynamic_debug/control
+
+que enseña una por una las rutas que intenta y por qué falla cada una.
+
+**La solución:** `/mnt/wsl` es un tmpfs **común a los dos** sistemas de archivos. Se
+deja ahí el firmware y se apunta el kernel a esa carpeta:
+
+    cp /usr/lib/firmware/rtlwifi/rtl8192eu_nic.bin /mnt/wsl/fw/rtlwifi/
+    printf '/mnt/wsl/fw' > /sys/module/firmware_class/parameters/path
+
+Como es un tmpfs, se vacía en cada arranque de WSL. De eso se encarga el servicio
+**`netpulse-firmware.service`** (`captura-externa/firmware-wsl.sh`), ya habilitado.
+
+### Funcionando, verificado en vivo
+
+    usb 1-1: Firmware revision 35.7 (signature 0x92e1)
+    wlx98254ad4b1d2 ... type monitor
+
+- El adaptador externo entra en **modo monitor** de verdad.
+- Capturó **978 tramas** del aire en 20 s: **13 redes** del vecindario y **44 equipos**,
+  con **0 descartes**. Repetido con el script: 503 tramas, 10 redes, 39 equipos.
+- **El equipo conservó internet todo el tiempo**: la Intel interna siguió `Up` y con
+  conectividad real comprobada contra `1.1.1.1`.
+- Los resúmenes en JSON llegan a `%APPDATA%\NetPulse\captura`.
+
+Queda confirmada, entonces, la afirmación que el plan daba por imposible: el modo
+monitor **sí** es alcanzable con este adaptador, sacando la captura de Windows.
+
+### Lo que viene
+
+Acordar con Nicolás **la vía de datos** hacia la interfaz de NetPulse: hoy el
+contenedor deja un JSON por captura, y hay que decidir si la aplicación lo lee de esa
+carpeta, si el contenedor se lo entrega en vivo, o cualquier otra forma. Lo dejó
+expresamente para el momento de implementar.
+
+Nota sobre la enumeración: tras un `attach` nuevo, el adaptador tarda **cerca de un
+minuto** en que Linux lo reconozca; es la latencia del túnel durante la enumeración
+USB. No es un fallo, hay que esperarlo — el script ya lo hace.
+
+### Cómo se usa
 
     cd Desktop\scannerlab\captura-externa
     .\netpulse-captura.ps1 estado
